@@ -202,6 +202,244 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/ngn/customers/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Is this customer reference verified?
+         * @description Read-only check against the naira provider. Creating nothing is the point: the only previous way to ask was to provision a customer and read `verified` off the reply, which needed a full set of personal details to answer a yes/no question about a reference the caller already held. Rate-limited, because a reference is derived from a wallet address and an unthrottled answer would be an oracle.
+         */
+        get: {
+            parameters: {
+                query: {
+                    /** @description Our identifier for the person, stable for the life of their install. Derived from the wallet address, never a provider id. */
+                    customerRef: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            customerRef: string;
+                            /** @description Whether the provider verifies this reference right now. Read-only: asking does not create a customer and does not spend a verification attempt, which is the reason this route exists. */
+                            verified: boolean;
+                            status?: string;
+                        };
+                    };
+                };
+                /** @description Bad Request (invalid_request / invalid_network / network_not_enabled / mainnet_only) */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
+                        };
+                    };
+                };
+                /** @description Not Found (code: not_found) */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
+                        };
+                    };
+                };
+                /** @description Rate limited (veil_rate_limited ours / rate_limited the provider's) */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
+                        };
+                    };
+                };
+                /** @description Internal Server Error (code: internal_error) */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
+                        };
+                    };
+                };
+                /** @description Provider error */
+                502: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
+                        };
+                    };
+                };
+                /** @description Naira rails not configured on this deployment */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
+                        };
+                    };
+                };
+                /** @description Provider did not respond in time */
+                504: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/ngn/bills/data-bundles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Data bundle catalogue
+         * @description Read-only list of the data bundles a `data` bill can buy, optionally filtered by provider. Data is sold as catalogue items rather than arbitrary amounts, so the client picks one of these. Cached for five minutes.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Network to filter by, case-insensitive. Omit it to list every provider's bundles. */
+                    provider?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            bundles: {
+                                /** @example MTN */
+                                provider: string;
+                                /**
+                                 * @description Opaque bundle identifier. Pass it back unchanged when buying the bundle; do not parse it.
+                                 * @example mtn-1gb-30d
+                                 */
+                                code: string;
+                                /** @example 1 GB / 30 days */
+                                label: string;
+                                megabytes: number;
+                                validityDays: number;
+                                /** @description Price in naira. */
+                                amountNgn: number;
+                            }[];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/metrics": {
         parameters: {
             query?: never;
@@ -268,17 +506,39 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            /** @enum {boolean} */
-                            ok: true;
-                            /** @enum {string} */
-                            network?: "testnet" | "mainnet";
                             lastIndexedLedger: number | null;
-                            latestLedger: number;
-                            lagLedgers: number;
+                            latestLedger: number | null;
+                            lagLedgers: number | null;
                             /** Format: date-time */
-                            startedAt: string;
-                            uptimeSeconds: number;
-                            totalIndexed: number;
+                            startedAt?: string;
+                            uptimeSeconds?: number;
+                            totalIndexed?: number;
+                            networks?: {
+                                [key: string]: {
+                                    lastIndexedLedger: number | null;
+                                    latestLedger: number | null;
+                                    lagLedgers: number | null;
+                                    running: boolean;
+                                    reason?: string;
+                                } & {
+                                    [key: string]: unknown;
+                                };
+                            };
+                            /** @enum {string} */
+                            status: "healthy" | "degraded";
+                            dependencies: {
+                                name: string;
+                                /** @enum {string} */
+                                status: "ok" | "degraded" | "down" | "unknown";
+                                /** Format: date-time */
+                                lastCheckedAt: string | null;
+                                /** Format: date-time */
+                                lastOkAt: string | null;
+                                latencyMs: number | null;
+                                detail: string | null;
+                            }[];
+                        } & {
+                            [key: string]: unknown;
                         };
                     };
                 };
@@ -2212,6 +2472,206 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/fees": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Veil platform fee
+         * @description What the wallet should charge on a send, and where to pay it, per asset. The fee is collected on-chain in the same transaction as the send; this only tells the client the amount, so it can change without shipping an app. Unauthenticated and served with `Cache-Control: no-store`, because a stale fee is one the user was shown but did not agree to. `enabled: false` means no fee is configured today.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description The amount being sent, in whole units of the asset. When given and a percentage fee is computed for it; without it each fee is the floor. Optional because shipped clients predate it. */
+                    amount?: string | null;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description False when no fee is configured, so a client can tell a deliberate waiver from a backend too old to know about fees. */
+                            enabled: boolean;
+                            /** @description Keyed by asset code. Always charged in the asset being sent. */
+                            fees: {
+                                [key: string]: {
+                                    /**
+                                     * @description What to charge, in whole units of the fee asset, as a decimal string.
+                                     * @example 0.25
+                                     */
+                                    amount: string;
+                                    /** @example USDC */
+                                    assetCode: string;
+                                    /** @description Null for native XLM. */
+                                    assetIssuer: string | null;
+                                    /** @description The classic account the fee is paid to. */
+                                    destination: string;
+                                    /** @description Percent of the sent amount, when the fee scales. Absent when it is flat. */
+                                    percent?: string;
+                                    /** @description Floor; present only alongside percent. */
+                                    min?: string;
+                                    /** @description Cap; present only alongside percent. */
+                                    max?: string;
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/ops/failures": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Recent money-affecting failures (operator view)
+         * @description Internal operator endpoint, not part of the public data API. Lists the durable records of money-affecting failures — a rejected payout, an order that ended failed after the user paid, a webhook reconciliation that gave up — so an operator can answer "what broke today" without a log search or database access. Ordinary validation errors are never recorded here. Requires `Authorization: Bearer <OPS_TOKEN>`; answers 503 when the deployment has no token configured, and 401 for a missing or wrong one. Rows name the rail, the order and what failed, and never carry a NIN.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Only failures on this rail. A bounded vocabulary, so an unknown value is a 400 rather than a silent empty page. */
+                    rail?: string | null;
+                    /** @description Only failures of this kind. Likewise bounded — an unknown value is a 400. */
+                    kind?: string | null;
+                    /** @description Page size. Defaults to 50 and is capped at 200; this is a page, not an export. */
+                    limit?: number | null;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Recent failures, newest first. */
+                            failures: {
+                                /** @example testnet */
+                                network: string;
+                                /**
+                                 * @description Which rail failed: offramp, onramp, bill, or unknown.
+                                 * @example offramp
+                                 */
+                                rail: string;
+                                /**
+                                 * @description What kind of failure: payout_rejected, order_failed, or reconcile_failed.
+                                 * @example payout_rejected
+                                 */
+                                kind: string;
+                                /** @description The provider's order id. Null only when no order had been identified yet. */
+                                orderId: string | null;
+                                /** @description Our client-facing order id, when the order had one (cash-out orders do). */
+                                publicId: string | null;
+                                /** @description The provider's status or error code, verbatim. Never a raw provider message: that is unbounded prose and may carry personal data. */
+                                providerCode: string | null;
+                                /** @description What failed, in operator-facing words. Fixed strings or the provider's status vocabulary; never a NIN, bank details or an amount. */
+                                message: string;
+                                /** @description How many times this failure has been observed. A webhook redelivery or status poll of the same failed order increments this instead of adding a row. */
+                                occurrences: number;
+                                /** Format: date-time */
+                                firstSeenAt: string;
+                                /** Format: date-time */
+                                lastSeenAt: string;
+                            }[];
+                            /** @description The page size actually applied, after capping. */
+                            limit: number;
+                        };
+                    };
+                };
+                /** @description Bad Request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Missing or wrong operator token */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Not Found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Internal Server Error */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Ops endpoints are not configured on this deployment */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/transfers.csv": {
         parameters: {
             query?: never;
@@ -2452,7 +2912,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/offramp/rate": {
+    "/offramp/availability": {
         parameters: {
             query?: never;
             header?: never;
@@ -2460,8 +2920,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Indicative NGN/USDC rate
-         * @description Internal endpoint. Not part of the public data API: (provider callback / wallet-only cash-out surface served on behalf of the Veil wallet client).
+         * Is cash-out enabled on this deployment
+         * @description Internal endpoint. Not part of the public data API: (provider callback / wallet-only cash-out surface served on behalf of the Veil wallet client). Answers the availability question without pricing anything: it makes no provider call, so it costs none of the shared rate allowance.
          */
         get: {
             parameters: {
@@ -2479,11 +2939,8 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            rate: number;
-                            currency: string;
-                            coin: string;
                             /** @enum {boolean} */
-                            indicative: true;
+                            available: true;
                         };
                     };
                 };
@@ -2520,6 +2977,129 @@ export interface paths {
                         };
                     };
                 };
+                /** @description Offramp not configured on this deployment */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/offramp/rate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Indicative naira-per-coin rate
+         * @description Internal endpoint. Not part of the public data API: (provider callback / wallet-only cash-out surface served on behalf of the Veil wallet client).
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Asset to price. Send it: without one the answer is priced for `usdc`, which is naira per dollar and wrong for every other asset by that asset's price. Omitting it is deprecated and will be refused once the installed wallet builds ask for a coin; a response always names the coin it was priced for. */
+                    coin?: "xlm" | "usdc";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /**
+                             * @description The asset `rate` is quoted per unit of. Always present, including for a request that named none — which is priced as `usdc`.
+                             * @enum {string}
+                             */
+                            coin: "xlm" | "usdc";
+                            /** @description Naira per one unit of the requested coin, not naira per dollar. */
+                            rate: number;
+                            /** @enum {boolean} */
+                            indicative: true;
+                        };
+                    };
+                };
+                /** @description Bad Request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Not Found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Rate limited (this deployment's or the provider's — the `code` says which) */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
+                        };
+                    };
+                };
+                /** @description Internal Server Error */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
                 /** @description Payout provider error */
                 502: {
                     headers: {
@@ -2527,7 +3107,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
                             error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
                         };
                     };
                 };
@@ -2538,7 +3126,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
                             error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
                         };
                     };
                 };
@@ -2619,6 +3215,25 @@ export interface paths {
                         };
                     };
                 };
+                /** @description Rate limited (this deployment's or the provider's — the `code` says which) */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
+                        };
+                    };
+                };
                 /** @description Internal Server Error */
                 500: {
                     headers: {
@@ -2637,7 +3252,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
                             error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
                         };
                     };
                 };
@@ -2648,7 +3271,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
                             error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
                         };
                     };
                 };
@@ -2717,6 +3348,25 @@ export interface paths {
                         };
                     };
                 };
+                /** @description Rate limited (this deployment's or the provider's — the `code` says which) */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
+                        };
+                    };
+                };
                 /** @description Internal Server Error */
                 500: {
                     headers: {
@@ -2735,7 +3385,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
                             error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
                         };
                     };
                 };
@@ -2746,7 +3404,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
                             error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
                         };
                     };
                 };
@@ -2872,6 +3538,25 @@ export interface paths {
                         };
                     };
                 };
+                /** @description Rate limited (this deployment's or the provider's — the `code` says which) */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
+                        };
+                    };
+                };
                 /** @description Internal Server Error */
                 500: {
                     headers: {
@@ -2890,7 +3575,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
                             error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
                         };
                     };
                 };
@@ -2901,7 +3594,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
                             error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
                         };
                     };
                 };
@@ -2971,6 +3672,25 @@ export interface paths {
                         };
                     };
                 };
+                /** @description Order access token required (code: unauthorized) */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
+                        };
+                    };
+                };
                 /** @description Not Found */
                 404: {
                     headers: {
@@ -2979,6 +3699,25 @@ export interface paths {
                     content: {
                         "application/json": {
                             error: string;
+                        };
+                    };
+                };
+                /** @description Rate limited (this deployment's or the provider's — the `code` says which) */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
                         };
                     };
                 };
@@ -3000,11 +3739,154 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
                             error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
                         };
                     };
                 };
                 /** @description Offramp not configured on this deployment */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Prose for a person. Never branch on it — it changes when the provider rewords an error. */
+                            error: string;
+                            /**
+                             * @description Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.
+                             * @example coin_not_available
+                             */
+                            code: string;
+                            /** @description On a provider 429 only: how long the shared limit asks you to wait. */
+                            retryAfterSeconds?: number;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fees/report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Platform fees charged, per UTC day and asset, with the policy behind them
+         * @description Internal endpoint. Not part of the public data API: an operator report over the fee ledger, behind the VEIL_FEE_REPORT_TOKEN bearer token. Nothing in it identifies a person.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description First UTC date to report, YYYY-MM-DD. Defaults to today. */
+                    from?: string | null;
+                    /** @description Last UTC date to report, inclusive, YYYY-MM-DD. Defaults to `from`. At most 92 days after it. */
+                    to?: string | null;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            network: string;
+                            from: string;
+                            to: string;
+                            /** @description VEIL_FEE_ALARM_PERCENT in force for this report. */
+                            alarmPercent: number;
+                            days: {
+                                date: string;
+                                assets: {
+                                    assetCode: string;
+                                    assetIssuer: string | null;
+                                    quotes: number;
+                                    /** @description Sum of every fee quoted — what clients were told to charge. */
+                                    feesQuoted: string;
+                                    alarms: number;
+                                    policyIds: string[];
+                                    /** @description What the fee destination received in this asset that day, per the index. Null when the asset is not indexed — which is not zero. */
+                                    collected: string | null;
+                                    collectedNote?: string;
+                                }[];
+                            }[];
+                            policies: {
+                                [key: string]: {
+                                    firstSeenAt: string;
+                                    policy: {
+                                        /** @enum {string} */
+                                        mode: "flat" | "percent";
+                                        assetCode: string;
+                                        assetIssuer: string | null;
+                                        /** @description The fee destination — the address `/fees` already publishes. */
+                                        destination: string;
+                                        percent: string | null;
+                                        min: string | null;
+                                        max: string | null;
+                                        /** @description Flat mode only: the fixed fee. */
+                                        amount: string | null;
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+                /** @description Bad date range */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Missing or wrong report token */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+                /** @description The fee ledger could not be read */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Fee reporting is not configured on this deployment */
                 503: {
                     headers: {
                         [name: string]: unknown;
@@ -3019,6 +3901,292 @@ export interface paths {
         };
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/discord/interactions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Discord interaction callback
+         * @description Internal endpoint. Not part of the public data API: it belongs to the Veil Discord roles bot. Answers 503 unless the deployment has a Discord application configured. Called by Discord when a member uses a command or presses a button. Every request is verified against the application's Ed25519 public key; anything else is answered 401.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Interaction response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            type: number;
+                        } & {
+                            [key: string]: unknown;
+                        };
+                    };
+                };
+                /** @description Unreadable interaction */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                            code: string;
+                        };
+                    };
+                };
+                /** @description Invalid request signature */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                            code: string;
+                        };
+                    };
+                };
+                /** @description Discord is not configured on this deployment */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                            code: string;
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/discord/link/{code}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Which Discord member a link code belongs to
+         * @description Internal endpoint. Not part of the public data API: it belongs to the Veil Discord roles bot. Answers 503 unless the deployment has a Discord application configured. Lets the wallet show whose Discord account is about to be linked before the member approves. Returns no wallet address and cannot be used to look one up.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description The eight-character code the bot gave the member. Case and a dash are ignored. */
+                    code: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Discord's id for the member. Part of the text the wallet signs. */
+                            discordUserId: string;
+                            /** @description Shown to the member before they approve. */
+                            discordUsername: string;
+                            /** @description ISO time after which the code stops working. */
+                            expiresAt: string;
+                        };
+                    };
+                };
+                /** @description The code is unknown, used, or has run out */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                            code: string;
+                        };
+                    };
+                };
+                /** @description Discord is not configured on this deployment */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                            code: string;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/discord/link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Prove a Veil wallet belongs to a Discord member
+         * @description Internal endpoint. Not part of the public data API: it belongs to the Veil Discord roles bot. Answers 503 unless the deployment has a Discord application configured. The wallet's passkey (and the spending account's key, when sent) sign a statement naming the code, the Discord member and the addresses. The passkey must be a signer the wallet contract lists and the contract must run Veil's wallet code. On success the member's roles are set. The response never contains an address.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        code: string;
+                        /** @description The smart wallet (C address), when one is being linked. */
+                        wallet?: string | null;
+                        /** @description The spending account (G address), when one is being linked. */
+                        spending?: string | null;
+                        /** @description Required with `wallet`: the passkey's signature over the link statement. */
+                        passkey?: {
+                            /** @description Base64url, 65 bytes: the passkey's uncompressed P-256 public key. */
+                            publicKey: string;
+                            /** @description Base64url WebAuthn authenticator data. */
+                            authData: string;
+                            /** @description Base64url WebAuthn client data. */
+                            clientDataJSON: string;
+                            /** @description Base64url, 64 bytes: the raw r and s of the signature. */
+                            signature: string;
+                        };
+                        /** @description Required with `spending`: base64url Ed25519 signature over the link statement hash. */
+                        spendingSignature?: string;
+                        /** @description Veil names the app believes the member holds. Each is checked against the registry. */
+                        names?: string[];
+                    };
+                };
+            };
+            responses: {
+                /** @description Linked */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            linked: true;
+                            discordUsername: string;
+                            /** @description The role names the member now has. */
+                            roles: string[];
+                            /** @description True when a check could not be finished and will be retried. */
+                            incomplete: boolean;
+                            /** @description False when the member is not in the server, so no role could be set. */
+                            inServer: boolean;
+                        };
+                    };
+                };
+                /** @description An address is missing or not valid */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                            code: string;
+                        };
+                    };
+                };
+                /** @description A signature did not check out, or the address is not a Veil wallet */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                            code: string;
+                        };
+                    };
+                };
+                /** @description The network has no record of the wallet (it may have been archived) */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                            code: string;
+                        };
+                    };
+                };
+                /** @description The code is unknown, used, or has run out */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                            code: string;
+                        };
+                    };
+                };
+                /** @description Discord is not configured, or the network could not be read */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                            code: string;
+                        };
+                    };
+                };
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;

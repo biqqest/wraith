@@ -210,29 +210,36 @@ export const readyzResponseSchema = z.object({
     .optional(),
 });
 
+const dependencyStatusSchema = z.object({
+  name: z.string(),
+  status: z.enum(["ok", "degraded", "down", "unknown"]),
+  lastCheckedAt: z.string().datetime({ offset: true }).nullable(),
+  lastOkAt: z.string().datetime({ offset: true }).nullable(),
+  latencyMs: z.number().int().nullable(),
+  detail: z.string().nullable(),
+});
+
 export const statusResponseSchema = z.object({
-  ok: z.literal(true),
-  /** The network the top-level fields describe; `networks` reports every loop. */
-  network: z.enum(["testnet", "mainnet"]).optional(),
   lastIndexedLedger: z.number().int().nullable(),
   latestLedger: z.number().int().nullable(),
   lagLedgers: z.number().int().nullable(),
   startedAt: z.string().datetime({ offset: true }).optional(),
   uptimeSeconds: z.number().int().optional(),
   totalIndexed: z.number().int().optional(),
-  networks: z
-    .record(
-      z.string(),
-      z.object({
-        lastIndexedLedger: z.number().int().nullable(),
-        latestLedger: z.number().int().nullable(),
-        lagLedgers: z.number().int().nullable(),
-        running: z.boolean(),
-        reason: z.string().optional(),
-      }).passthrough()
-    )
-    .optional(),
+  networks: z.record(
+    z.string(),
+    z.object({
+      lastIndexedLedger: z.number().int().nullable(),
+      latestLedger: z.number().int().nullable(),
+      lagLedgers: z.number().int().nullable(),
+      running: z.boolean(),
+      reason: z.string().optional(),
+    }).passthrough()
+  ).optional(),
+  status: z.enum(["healthy", "degraded"]),
+  dependencies: z.array(dependencyStatusSchema),
 }).passthrough();
+
 
 export const transferSchema = z.object({
   id: z.number().int(),
@@ -647,10 +654,38 @@ export const linqWebhookAckResponseSchema = z.object({
 
 // ─── /offramp/* — cash-out surface (internal) ───────────────────────────────
 
+/**
+ * `available` is always true on a 200; the answer a client gates on is the
+ * status. The body exists so a redirect or a proxy's error page cannot be read
+ * as cash-out being up by a caller that only looked at the status code.
+ */
+export const offrampAvailabilityResponseSchema = z.object({
+  available: z.literal(true),
+});
+
+export const offrampRateQuerySchema = z
+  .object({
+    /**
+     * Which asset to price. Omitted is served as `usdc` and logged — see the
+     * rollout note in `api/offramp.ts`; omitting it will 400 once the installed
+     * clients send a coin.
+     */
+    coin: z.enum(["xlm", "usdc"]).optional().openapi({
+      description:
+        "Asset to price. Send it: without one the answer is priced for `usdc`, which is naira per dollar and wrong for every other asset by that asset's price. Omitting it is deprecated and will be refused once the installed wallet builds ask for a coin; a response always names the coin it was priced for.",
+      example: "usdc",
+    }),
+  })
+  .passthrough();
+
 export const offrampRateResponseSchema = z.object({
-  rate: z.number(),
-  currency: z.string(),
-  coin: z.string(),
+  coin: z.enum(["xlm", "usdc"]).openapi({
+    description:
+      "The asset `rate` is quoted per unit of. Always present, including for a request that named none — which is priced as `usdc`.",
+  }),
+  rate: z.number().openapi({
+    description: "Naira per one unit of the requested coin, not naira per dollar.",
+  }),
   /** Always true: the binding rate is the one locked into an order at creation. */
   indicative: z.literal(true),
 });
@@ -743,38 +778,85 @@ export const offrampOrderStatusResponseSchema = z.object({
   source: z.enum(["live", "cache"]),
 });
 
-export const offrampErrorResponseSchema = z.object({
-  error: z.string(),
-});
-
-export const ngnCustomerStatusQuerySchema = z.object({
-  customerRef: z.string().openapi({
+/**
+ * The one error shape both money rails answer with (#287).
+ *
+ * `code` is the stable, machine-readable half — snake_case and never renamed,
+ * so installed clients can branch on it — and `error` is prose for a person.
+ * A provider code passes through verbatim; when the provider sends none,
+ * wraith assigns one of its own fallbacks (`rate_limited`,
+ * `provider_rejected`, `provider_error`), so `code` is never absent on the
+ * rails. The full catalogue is documented in `docs/ngn-rails.md`.
+ */
+export const railErrorResponseSchema = z.object({
+  error: z.string().openapi({
     description:
-      "Our identifier for the person, stable for the life of their install. " +
-      "Derived from the wallet address, never a provider id.",
-    example: "veil_a1b2c3d4e5f6",
+      "Prose for a person. Never branch on it — it changes when the provider rewords an error.",
+  }),
+  code: z.string().openapi({
+    description:
+      "Stable machine-readable reason. Provider codes arrive verbatim; wraith-assigned codes are catalogued in docs/ngn-rails.md.",
+    example: "coin_not_available",
+  }),
+  retryAfterSeconds: z.number().optional().openapi({
+    description: "On a provider 429 only: how long the shared limit asks you to wait.",
   }),
 });
 
-export const ngnCustomerStatusResponseSchema = z.object({
-  customerRef: z.string(),
-  verified: z.boolean().openapi({
-    description:
-      "Whether the provider verifies this reference right now. Read-only: " +
-      "asking does not create a customer and does not spend a verification " +
-      "attempt, which is the reason this route exists.",
-  }),
-  status: z.string().optional(),
+
+export const feeReportQuerySchema = z.object({
+  from: optionalQueryString("First UTC date to report, YYYY-MM-DD. Defaults to today."),
+  to: optionalQueryString("Last UTC date to report, inclusive, YYYY-MM-DD. Defaults to `from`. At most 92 days after it."),
 });
 
+const feePolicySchema = z.object({
+  mode: z.enum(["flat", "percent"]),
+  assetCode: z.string(),
+  assetIssuer: z.string().nullable(),
+  destination: z.string().openapi({ description: "The fee destination — the address `/fees` already publishes." }),
+  percent: z.string().nullable(),
+  min: z.string().nullable(),
+  max: z.string().nullable(),
+  amount: z.string().nullable().openapi({ description: "Flat mode only: the fixed fee." }),
+});
+
+export const feeReportResponseSchema = z.object({
+  network: z.string(),
+  from: z.string(),
+  to: z.string(),
+  alarmPercent: z.number().openapi({ description: "VEIL_FEE_ALARM_PERCENT in force for this report." }),
+  days: z.array(
+    z.object({
+      date: z.string(),
+      assets: z.array(
+        z.object({
+          assetCode: z.string(),
+          assetIssuer: z.string().nullable(),
+          quotes: z.number().int(),
+          feesQuoted: z.string().openapi({ description: "Sum of every fee quoted — what clients were told to charge." }),
+          alarms: z.number().int(),
+          policyIds: z.array(z.string()),
+          collected: z.string().nullable().openapi({
+            description:
+              "What the fee destination received in this asset that day, per the index. " +
+              "Null when the asset is not indexed — which is not zero.",
+          }),
+          collectedNote: z.string().optional(),
+        }),
+      ),
+    }),
+  ),
+  policies: z.record(
+    z.string(),
+    z.object({ firstSeenAt: z.string(), policy: feePolicySchema }),
+  ),
+});
 
 // ─── GET /fees ──────────────────────────────────────────────────────────────
-
 export const feesQuerySchema = z.object({
   amount: optionalQueryString(
     "The amount being sent, in whole units of the asset. When given and a percentage " +
-      "fee is configured, each fee is computed for it; without it each fee is the " +
-      "floor. Optional because shipped clients predate it.",
+    "fee is computed for it; without it each fee is the floor. Optional because shipped clients predate it.",
   ).openapi({ example: "25" }),
 });
 
@@ -803,3 +885,159 @@ export const feesResponseSchema = z.object({
     description: "Keyed by asset code. Always charged in the asset being sent.",
   }),
 });
+
+// ─── GET /ops/failures ─────────────────────────────────────────────────────
+
+export const opsFailuresQuerySchema = z.object({
+  rail: optionalQueryString(
+    "Only failures on this rail. A bounded vocabulary, so an unknown value is a " +
+      "400 rather than a silent empty page.",
+  ).openapi({ example: "offramp" }),
+  kind: optionalQueryString(
+    "Only failures of this kind. Likewise bounded — an unknown value is a 400.",
+  ).openapi({ example: "payout_rejected" }),
+  limit: optionalQueryInt({
+    min: 1,
+    max: 200,
+    description: "Page size. Defaults to 50 and is capped at 200; this is a page, not an export.",
+  }),
+});
+
+/** One money-affecting failure, as an operator reads it. */
+const moneyFailureSchema = z.object({
+  network: z.string().openapi({ example: "testnet" }),
+  rail: z.string().openapi({
+    description: "Which rail failed: offramp, onramp, bill, or unknown.",
+    example: "offramp",
+  }),
+  kind: z.string().openapi({
+    description: "What kind of failure: payout_rejected, order_failed, or reconcile_failed.",
+    example: "payout_rejected",
+  }),
+  orderId: z.string().nullable().openapi({
+    description: "The provider's order id. Null only when no order had been identified yet.",
+  }),
+  publicId: z.string().nullable().openapi({
+    description: "Our client-facing order id, when the order had one (cash-out orders do).",
+  }),
+  providerCode: z.string().nullable().openapi({
+    description:
+      "The provider's status or error code, verbatim. Never a raw provider message: " +
+      "that is unbounded prose and may carry personal data.",
+  }),
+  message: z.string().openapi({
+    description:
+      "What failed, in operator-facing words. Fixed strings or the provider's status " +
+      "vocabulary; never a NIN, bank details or an amount.",
+  }),
+  occurrences: z.number().int().openapi({
+    description:
+      "How many times this failure has been observed. A webhook redelivery or status " +
+      "poll of the same failed order increments this instead of adding a row.",
+  }),
+  firstSeenAt: z.string().datetime({ offset: true }),
+  lastSeenAt: z.string().datetime({ offset: true }),
+});
+
+export const opsFailuresResponseSchema = z.object({
+  failures: z.array(moneyFailureSchema).openapi({ description: "Recent failures, newest first." }),
+  limit: z.number().int().openapi({ description: "The page size actually applied, after capping." }),
+});
+
+export const ngnCustomerStatusQuerySchema = z.object({
+  customerRef: z.string().openapi({
+    description:
+      "Our identifier for the person, stable for the life of their install. " +
+      "Derived from the wallet address, never a provider id.",
+    example: "veil_a1b2c3d4e5f6",
+  }),
+});
+
+export const ngnCustomerStatusResponseSchema = z.object({
+  customerRef: z.string(),
+  verified: z.boolean().openapi({
+    description:
+      "Whether the provider verifies this reference right now. Read-only: " +
+      "asking does not create a customer and does not spend a verification " +
+      "attempt, which is the reason this route exists.",
+  }),
+  status: z.string().optional(),
+});
+
+export const ngnDataBundlesQuerySchema = z.object({
+  provider: z.string().optional().openapi({
+    description: "Network to filter by, case-insensitive. Omit it to list every provider's bundles.",
+    example: "MTN",
+  }),
+});
+
+export const ngnDataBundleSchema = z.object({
+  provider: z.string().openapi({ example: "MTN" }),
+  code: z.string().openapi({
+    description:
+      "Opaque bundle identifier. Pass it back unchanged when buying the bundle; do not parse it.",
+    example: "mtn-1gb-30d",
+  }),
+  label: z.string().openapi({ example: "1 GB / 30 days" }),
+  megabytes: z.number().int(),
+  validityDays: z.number().int(),
+  amountNgn: z.number().openapi({ description: "Price in naira." }),
+});
+
+export const ngnDataBundlesResponseSchema = z.object({
+  bundles: z.array(ngnDataBundleSchema),
+});
+
+// ─── /discord/* — the Veil Discord roles bot (internal) ─────────────────────
+
+export const discordLinkCodeParamsSchema = z.object({
+  code: z.string().openapi({
+    description: "The eight-character code the bot gave the member. Case and a dash are ignored.",
+    example: "ABCD-2345",
+  }),
+});
+
+export const discordLinkCodeResponseSchema = z.object({
+  discordUserId: z.string().openapi({ description: "Discord's id for the member. Part of the text the wallet signs." }),
+  discordUsername: z.string().openapi({ description: "Shown to the member before they approve." }),
+  expiresAt: z.string().openapi({ description: "ISO time after which the code stops working." }),
+});
+
+export const discordLinkRequestSchema = z.object({
+  code: z.string(),
+  wallet: z.string().nullable().optional().openapi({ description: "The smart wallet (C address), when one is being linked." }),
+  spending: z.string().nullable().optional().openapi({ description: "The spending account (G address), when one is being linked." }),
+  passkey: z
+    .object({
+      publicKey: z.string().openapi({ description: "Base64url, 65 bytes: the passkey's uncompressed P-256 public key." }),
+      authData: z.string().openapi({ description: "Base64url WebAuthn authenticator data." }),
+      clientDataJSON: z.string().openapi({ description: "Base64url WebAuthn client data." }),
+      signature: z.string().openapi({ description: "Base64url, 64 bytes: the raw r and s of the signature." }),
+    })
+    .optional()
+    .openapi({ description: "Required with `wallet`: the passkey's signature over the link statement." }),
+  spendingSignature: z.string().optional().openapi({
+    description: "Required with `spending`: base64url Ed25519 signature over the link statement hash.",
+  }),
+  names: z.array(z.string()).optional().openapi({
+    description: "Veil names the app believes the member holds. Each is checked against the registry.",
+  }),
+});
+
+export const discordLinkResponseSchema = z.object({
+  linked: z.literal(true),
+  discordUsername: z.string(),
+  roles: z.array(z.string()).openapi({ description: "The role names the member now has." }),
+  incomplete: z.boolean().openapi({ description: "True when a check could not be finished and will be retried." }),
+  inServer: z.boolean().openapi({ description: "False when the member is not in the server, so no role could be set." }),
+});
+
+export const discordErrorResponseSchema = z.object({
+  error: z.string(),
+  code: z.string(),
+});
+
+export const discordInteractionResponseSchema = z
+  .object({ type: z.number().int() })
+  .passthrough()
+  .openapi({ description: "A Discord interaction response, in Discord's own format." });

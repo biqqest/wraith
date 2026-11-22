@@ -1,6 +1,7 @@
 import "dotenv/config";
 import http from "http";
 import { execSync } from "child_process";
+import { randomUUID } from "crypto";
 import { createApp } from "./api";
 import { startAllIndexers } from "./indexer";
 import { prisma } from "./db";
@@ -8,23 +9,147 @@ import { attachWebSocketServer } from "./ws";
 import { attachGraphQLSubscriptions, SUBSCRIPTIONS_PATH } from "./graphql/subscriptions";
 import { startWebhookWorker } from "./workers/webhooks";
 import { startPartitionRetentionJob } from "./jobs/retention";
+import { startOrderReconciliationJob } from "./jobs/orderReconciliation";
+import { startDiscordRolesJob } from "./discord/sync";
 import { initTokenCache } from "./tokenCache";
 import { enabledNetworks } from "./network";
-import { onlyAddsUniqueConstraints, pushSchema } from "./schemaGuard";
+import { isDatabaseUnreachable, onlyAddsUniqueConstraints, pushSchema } from "./schemaGuard";
+import { auditMigrationHistory, missingSchemaObjects } from "./schemaState";
+import { startOhlcRefreshWorker } from "./workers/ohlc-refresh";
+import { getOhlcRefreshIntervalMs } from "./ohlcConfig";
+import { validateEnv } from "./validateEnv";
+import { logger } from "./logger";
 
 const PORT = parseInt(process.env.PORT ?? "3000", 10);
+// How long startup waits for an unreachable database before giving up: eight
+// tries, fifteen seconds apart, about two minutes on top of each attempt's own
+// connection timeout. Short enough that a deploy still fails visibly.
+const CONVERGE_RETRIES = 8;
+const CONVERGE_RETRY_DELAY_MS = 15_000;
 
 async function main() {
+  // First thing in `main`, not at module load. A missing DATABASE_URL should
+  // stop the process with the name of what is missing, rather than surface
+  // later as a connection error that says nothing about configuration. It runs
+  // here rather than top-level because the startup-wiring tests import this
+  // module, and a module-load throw would fail them on an env they do not need.
+  validateEnv();
+
+  const bootId = randomUUID();
+
+  // ── What the database actually has ──────────────────────────────────────────
+  // Record the migration-history finding first. Diagnostic only: this database
+  // was built by `db push`, so an absent or partial `_prisma_migrations` is the
+  // expected finding (docs/drift-recovery.md records the investigation), and
+  // this never writes to it, never baselines and never resolves a migration.
+  // Doing so automatically would mark an unrecorded migration as applied —
+  // hiding the one that genuinely is not.
+  try {
+    const audit = await auditMigrationHistory(prisma);
+    logger.info("schema.migrations.audit", {
+      route: "startup",
+      status: 0,
+      durationMs: 0,
+      requestId: bootId,
+      historyTablePresent: audit.historyTablePresent,
+      historySchema: audit.historySchema,
+      applied: audit.appliedCount,
+      failed: audit.failedCount,
+      unrecorded: audit.unrecorded.length,
+      unexpected: audit.unexpected.length,
+    });
+    if (!audit.historyTablePresent) {
+      logger.warn("schema.migrations.history_absent", {
+        route: "startup",
+        status: 0,
+        durationMs: 0,
+        requestId: bootId,
+        unrecorded: audit.unrecorded.length,
+      });
+    } else if (audit.unrecorded.length > 0) {
+      logger.warn("schema.migrations.unrecorded", {
+        route: "startup",
+        status: 0,
+        durationMs: 0,
+        requestId: bootId,
+        count: audit.unrecorded.length,
+        migrations: audit.unrecorded,
+      });
+    }
+    if (audit.unexpected.length > 0) {
+      logger.error("schema.migrations.unexpected", {
+        route: "startup",
+        status: 0,
+        durationMs: 0,
+        requestId: bootId,
+        count: audit.unexpected.length,
+        migrations: audit.unexpected,
+      });
+    }
+    if (audit.failedCount > 0) {
+      logger.error("schema.migrations.failed_rows", {
+        route: "startup",
+        status: 0,
+        durationMs: 0,
+        requestId: bootId,
+        count: audit.failedCount,
+      });
+    }
+  } catch (err) {
+    // A history that cannot be read is not an empty history. The drift check
+    // below is the one that gates startup; this is the record that the audit
+    // itself failed, so nobody mistakes silence for "no unrecorded migrations".
+    logger.warn("schema.migrations.audit_failed", {
+      route: "startup",
+      status: 0,
+      durationMs: 0,
+      requestId: bootId,
+      errorName: (err as Error)?.name ?? "unknown error",
+    });
+  }
+
+  // Detect before converging, so a deploy that is about to bring a column into
+  // existence says so in the log instead of changing the schema silently. If
+  // the database cannot be inspected, refuse to start: serving on an unverified
+  // schema is the state this check exists to rule out.
+  let missing = await missingSchemaObjects(prisma).catch((err) => {
+    logger.error("schema.drift.check_failed", {
+      route: "startup",
+      status: 0,
+      durationMs: 0,
+      requestId: bootId,
+      errorName: (err as Error)?.name ?? "unknown error",
+    });
+    process.exit(1);
+  });
+  if (missing.length > 0) {
+    logger.warn("schema.drift.detected", {
+      route: "startup",
+      status: 0,
+      durationMs: 0,
+      requestId: bootId,
+      count: missing.length,
+      tables: missing.map((object) => object.table),
+      missingColumns: missing.map((object) => object.missingColumns),
+    });
+  }
+
   // Converge the schema on every startup, so a deploy needs no separate
   // pre-deploy step.
   //
   // This is `db push` rather than `migrate deploy` because the migration
-  // history cannot support the latter: `prisma/migrations` holds 7 migrations
-  // covering 5 tables, while the schema defines 15. TokenTransfer,
-  // AccountSummary, IndexerState and OfframpOrder have no migration at all —
-  // this database was built by `db push` from the beginning. Switching without
-  // baselining production first would create five tables and leave the app
-  // crashing on the other ten.
+  // history cannot support the latter: the committed migrations do not create
+  // the `wraith` schema or most of the tables — TokenTransfer, OfframpOrder
+  // and NgnOrder have no migration at all — because this database was built by
+  // `db push` from the beginning. A fresh database aborts on the first
+  // migration (`schema "wraith" does not exist`); this one aborts with P3005
+  // ("database schema is not empty"). docs/drift-recovery.md records the
+  // investigation and the evidence.
+  //
+  // The drift detected above is logged, applied if additive, and checked again
+  // below. Detection is not a substitute for convergence: an insertion into a
+  // column the database does not have is the outage this guards against, and on
+  // the offramp it means a real provider order with no local record.
   //
   // `--accept-data-loss` was removed deliberately. With it, any change Prisma
   // reads as destructive — a renamed column, a narrowed type, a dropped field
@@ -36,8 +161,31 @@ async function main() {
   //
   // Additive changes — a new table, a new nullable column — still apply on
   // their own. Anything destructive now fails loudly here instead.
-  console.log("[wraith] Converging database schema…");
-  const first = pushSchema();
+  logger.info("schema.converge.start", { route: "startup", status: 0, durationMs: 0, requestId: bootId });
+  let first = pushSchema();
+  // Wait out a database that cannot be reached instead of exiting on the first
+  // refused connection. Bounded: after the last attempt this still exits, with
+  // a log line that says what actually happened. See `isDatabaseUnreachable`.
+  for (
+    let attempt = 1;
+    !first.ok && isDatabaseUnreachable(first.output) && attempt <= CONVERGE_RETRIES;
+    attempt++
+  ) {
+    logger.warn("schema.converge.database_unreachable_retrying", {
+      route: "startup",
+      status: 0,
+      durationMs: 0,
+      requestId: bootId,
+      attempt,
+      of: CONVERGE_RETRIES,
+    });
+    await new Promise((resolve) => setTimeout(resolve, CONVERGE_RETRY_DELAY_MS));
+    first = pushSchema();
+  }
+  if (!first.ok && isDatabaseUnreachable(first.output)) {
+    logger.error("schema.converge.database_unreachable", { route: "startup", status: 0, durationMs: 0, requestId: bootId });
+    process.exit(1);
+  }
   if (!first.ok) {
     // `--accept-data-loss` consents to two very different things at once, and
     // Prisma gives no way to agree to one without the other.
@@ -53,33 +201,51 @@ async function main() {
     // unique constraint, consent and retry. If even one is anything else,
     // refuse exactly as before.
     if (onlyAddsUniqueConstraints(first.output)) {
-      console.warn(
-        "[wraith] Schema diff is unique constraints only — no column is dropped.\n" +
-          "[wraith] Applying. A duplicate would fail the index, not delete a row.",
-      );
+      logger.warn("schema.converge.unique_constraints_only", { route: "startup", status: 0, durationMs: 0, requestId: bootId });
       const retry = pushSchema("--accept-data-loss");
       if (!retry.ok) {
-        console.error(
-          "[wraith] The constraint could not be applied — most likely duplicate\n" +
-            "[wraith] rows already exist for it. Nothing was dropped. Resolve the\n" +
-            "[wraith] duplicates and redeploy.",
-        );
+        logger.error("schema.converge.constraint_failed", { route: "startup", status: 0, durationMs: 0, requestId: bootId });
         process.exit(1);
       }
     } else {
-      console.error(
-        "[wraith] Schema convergence refused: the pending change is destructive.\n" +
-          "[wraith] Nothing was dropped. Read the diff above — a rename or a type\n" +
-          "[wraith] change needs a deliberate migration, not --accept-data-loss.",
-      );
+      logger.error("schema.converge.refused_destructive", { route: "startup", status: 0, durationMs: 0, requestId: bootId });
       process.exit(1);
     }
   }
-  console.log("[wraith] Database ready.");
+  logger.info("schema.converge.ready", { route: "startup", status: 0, durationMs: 0, requestId: bootId });
+
+  // Verify, rather than assume, that convergence worked. A database still
+  // behind the code after the push is fatal: the alternative is serving routes
+  // whose writes fail, which is exactly the state #277 describes.
+  missing = await missingSchemaObjects(prisma).catch((err) => {
+    logger.error("schema.drift.verify_failed", {
+      route: "startup",
+      status: 0,
+      durationMs: 0,
+      requestId: bootId,
+      errorName: (err as Error)?.name ?? "unknown error",
+    });
+    process.exit(1);
+  });
+  if (missing.length > 0) {
+    logger.error("schema.drift.unresolved", {
+      route: "startup",
+      status: 0,
+      durationMs: 0,
+      requestId: bootId,
+      count: missing.length,
+      tables: missing.map((object) => object.table),
+      missingColumns: missing.map((object) => object.missingColumns),
+    });
+    process.exit(1);
+  }
+  logger.info("schema.verified", { route: "startup", status: 0, durationMs: 0, requestId: bootId });
 
   // ── Graceful shutdown ──────────────────────────────────────────────────────
+  let stopOhlcRefreshWorker: (() => void) | undefined;
   const shutdown = async (signal: string) => {
-    console.log(`\n[wraith] Received ${signal} — shutting down gracefully…`);
+    logger.info("shutdown.received", { route: "startup", status: 0, durationMs: 0, requestId: bootId, signal });
+    stopOhlcRefreshWorker?.();
     await prisma.$disconnect();
     process.exit(0);
   };
@@ -97,9 +263,9 @@ async function main() {
   attachGraphQLSubscriptions(server);
 
   server.listen(PORT, () => {
-    console.log(`[wraith] API listening on http://localhost:${PORT}`);
-    console.log(`[wraith] WebSocket subscriptions available at ws://localhost:${PORT}/subscribe/:address`);
-    console.log(`[wraith] GraphQL subscriptions available at ws://localhost:${PORT}${SUBSCRIPTIONS_PATH}`);
+    logger.info("server.listen", { route: "startup", status: 0, durationMs: 0, requestId: bootId, port: PORT });
+    logger.info("server.ws_ready", { route: "startup", status: 0, durationMs: 0, requestId: bootId, path: "/subscribe/:address" });
+    logger.info("server.graphql_ready", { route: "startup", status: 0, durationMs: 0, requestId: bootId, path: SUBSCRIPTIONS_PATH });
   });
 
   // ── Start webhook worker ───────────────────────────────────────────────────
@@ -108,10 +274,23 @@ async function main() {
   // ── Start partition retention scheduler ───────────────────────────────────
   startPartitionRetentionJob();
 
+  // The webhook is the fast path; this catches orders whose event never arrived.
+  startOrderReconciliationJob();
+
+  // The Discord roles bot. A no-op unless DISCORD_* is configured, and nothing
+  // it does is awaited here: a broken bot must not hold up the service.
+  startDiscordRolesJob();
+
   // Seed token metadata for every served network before handling read paths.
   // API-only deployments skip the indexer, so without this explicit seed their
   // displayAmount values would silently fall back to 7 decimals for every token.
   await Promise.all(enabledNetworks().map((network) => initTokenCache(network)));
+
+  // Opt in only after the OHLC tables and refresh functions are available.
+  const ohlcIntervalMs = getOhlcRefreshIntervalMs();
+  if (ohlcIntervalMs !== undefined) {
+    stopOhlcRefreshWorker = startOhlcRefreshWorker(ohlcIntervalMs);
+  }
 
   // ── Start indexer in the background ───────────────────────────────────────
   // startIndexer() runs an infinite loop; we intentionally don't await it
@@ -122,7 +301,7 @@ async function main() {
   // which exercises the HTTP surface only. Without this guard the indexer throws
   // on the missing RPC endpoint and takes the whole process (and API) down.
   if (process.env.SKIP_INDEXER === "true") {
-    console.log("[wraith] SKIP_INDEXER=true — indexer not started (API-only mode)");
+    logger.info("indexer.skipped", { route: "startup", status: 0, durationMs: 0, requestId: bootId });
   } else {
     // One loop per enabled network (NETWORKS env; defaults to STELLAR_NETWORK).
     // Each loop restarts itself on crash rather than taking the process down —
@@ -131,4 +310,8 @@ async function main() {
   }
 }
 
+// Called unconditionally, not behind `require.main === module`:
+// src/__tests__/ohlcStartup.test.ts boots the real entrypoint with
+// `jest.isolateModules(() => require("../index"))` to assert the startup
+// wiring, and under that require this module is not `require.main`.
 main();

@@ -1,23 +1,28 @@
 import express, { Request, Response, NextFunction } from "express";
-import cors from "cors";
 import rateLimit from "express-rate-limit";
 import { jsonApiMiddleware } from "./middleware/jsonapi";
+import { createCorsMiddleware } from "./middleware/cors";
 import { queryHostFnLogs } from "./indexer/host-fn-log";
 import { queryTransfers, queryAllTransfers, queryByTxHash, querySummary, queryNftTransfers, getNftOwner, getNftMetadata, getLastIndexedLedger, prisma } from "./db";
 import { getLatestLedger } from "./rpc";
 import { getIndexerStats, getAllIndexerStats, runningNetworks, isIndexerRunning, isIndexerStopped, getIndexerUnstartedReason } from "./indexer";
 import { currentNetwork, enabledNetworks, type Network } from "./network";
 import { createAccountsRouter } from "./api/accounts";
+import { createCandlesRouter } from "./api/candles";
+import { getOhlcRefreshIntervalMs } from "./ohlcConfig";
 import { createWebhooksRouter } from "./api/webhooks";
 import { createLinqWebhookRouter } from "./api/linqWebhook";
 import { createOfframpRouter } from "./api/offramp";
 import { createNgnRouter } from "./api/ngn";
+import { createOpsRouter } from "./api/ops";
+import { createDiscordInteractionsRouter } from "./discord/interactions";
+import { createDiscordLinkRouter } from "./discord/link";
 import { feesRouter } from "./api/fees";
 import { createGraphQLMiddleware } from "./graphql/server";
 import { createPopularAssetsRouter } from "./routes/assets/popular";
 import { createExportsRouter } from "./routes/exports";
 import { createSearchRouter } from "./routes/search";
-import { cacheMiddleware } from "./cache/redis";
+import { cacheMiddleware, cacheStatus } from "./cache/redis";
 import {
   hostFnQuerySchema,
   nftOwnerParamsSchema,
@@ -32,6 +37,9 @@ import { networkMiddleware, requestNetwork } from "./middleware/network";
 import { renderMetrics, metricsContentType, httpRequestsTotal, httpRequestDurationSeconds } from "./metrics";
 import { getAllCachedTokens, getCachedTokenDecimals } from "./tokenCache";
 import { toDisplayAmount } from "./amount";
+import { getDependencyStatus, dependencyStatusBoundMs } from "./dependencies";
+import { HttpError, newCorrelationId } from "./utils/errors";
+import { bodyParseFailure, loggableError } from "./utils/bodyError";
 
 // ─── RPC Health Check Cache ───────────────────────────────────────────────
 // Keyed by network (#163): one cache entry would let a healthy testnet RPC
@@ -69,7 +77,9 @@ const limiter = rateLimit({
   max: parseInt(process.env.RATE_LIMIT_MAX ?? "60", 10),
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: "Too many requests, please try again later." },
+  // `veil_rate_limited`, not `rate_limited`: this is our limiter, and a rail
+  // client has to tell it apart from the provider's shared limit.
+  message: { error: "Too many requests, please try again later.", code: "veil_rate_limited" },
   // /metrics is exempt: a scrape endpoint that starts 429ing goes blind exactly
   // when load is high enough to matter, which is when you need the graphs.
   skip: (req) => process.env.NODE_ENV === "test" || req.path === "/metrics",
@@ -135,8 +145,6 @@ export function createApp(): express.Application {
   // Render's X-Forwarded-For, nothing further back.
   app.set("trust proxy", 1);
 
-  app.use(cors());
-
   // ─── HTTP metrics middleware ──────────────────────────────────────────────
   // First in the chain, deliberately: mounted below networkMiddleware and the
   // rate limiter it would never see the requests those two reject, so a 429
@@ -177,6 +185,20 @@ export function createApp(): express.Application {
     next();
   });
 
+  // ─── CORS, per surface ─────────────────────────────────────────────────────
+  // One `cors()` for the whole app answered every request with
+  // `Access-Control-Allow-Origin: *`. That is right for the public read API
+  // and was never a decision for the routes that create orders. Each surface
+  // now has its own policy, and `src/middleware/cors.ts` is where that table
+  // lives — it says which surfaces are deliberately open and why, and it
+  // reads the allow-list from `CORS_ALLOWED_ORIGINS`, so a new client is an
+  // environment change rather than a change to this file.
+  //
+  // Below the metrics middleware on purpose: a request refused for its origin
+  // is a request we answered, and it should be counted like any other. Above
+  // every router, so no surface is left uncovered, and above `express.json()`,
+  // so a refused request never has its body parsed.
+  app.use(createCorsMiddleware());
 
   // BEFORE express.json(). Linq signs the raw request body, so a parser that
   // consumes and re-serialises it makes every signature unverifiable - the
@@ -184,6 +206,10 @@ export function createApp(): express.Application {
   // specifically, and it is silent when wrong: the route works, the signature
   // simply never matches.
   app.use("/webhooks/linq", createLinqWebhookRouter());
+  // Also before express.json(), for the same reason: Discord signs the raw
+  // body of every interaction. Above the rate limiter too, since every call
+  // arrives from Discord's own addresses and would share one bucket.
+  app.use("/discord/interactions", createDiscordInteractionsRouter());
 
   app.use(express.json());
   app.use(jsonApiMiddleware);
@@ -213,7 +239,12 @@ export function createApp(): express.Application {
     // our last known record". Letting this middleware write the same key would
     // have the app tell people the payment provider is down while it is
     // answering perfectly well.
-    if (req.path.startsWith("/ngn") || req.path.startsWith("/offramp")) {
+    //
+    // `/ops` joins them for a simpler reason: it reads failure records, not
+    // chain data. RPC health says nothing about whether its answer is current,
+    // and stamping `stale: true` onto an operator's incident list during an
+    // RPC outage is noise at exactly the wrong moment.
+    if (req.path.startsWith("/ngn") || req.path.startsWith("/offramp") || req.path.startsWith("/ops")) {
       return next();
     }
 
@@ -258,12 +289,20 @@ export function createApp(): express.Application {
 
   // ─── Accounts routes ─────────────────────────────────────────────────────
   app.use("/accounts", createAccountsRouter());
+  if (getOhlcRefreshIntervalMs() !== undefined) {
+    app.use("/candles", createCandlesRouter());
+  }
 
   // ─── Webhook subscription management ─────────────────────────────────────
   app.use("/webhooks", createWebhooksRouter());
   app.use("/offramp", createOfframpRouter());
   // Naira rails: buying with naira, and bills paid out of the wallet.
   app.use("/ngn", createNgnRouter());
+  // Operator surface: what broke, without database access. Token-gated by
+  // OPS_TOKEN; see .env.example.
+  app.use("/ops", createOpsRouter());
+  // Linking a Veil wallet to a Discord member (src/discord). 503 unless configured.
+  app.use("/discord", createDiscordLinkRouter());
   // What the client should charge, and where to send it. Server-held so the
   // amount is never compiled into an APK.
   app.use("/fees", feesRouter());
@@ -464,6 +503,7 @@ export function createApp(): express.Application {
       const rpcSuccess = latestLedgerResult.status === "fulfilled" && typeof latestLedgerResult.value === "number";
       const latestLedger = rpcSuccess ? latestLedgerResult.value : null;
       const stats = getIndexerStats(selected);
+      const dependencies = getDependencyStatus();
 
       // Per-network progress (#161). The top-level fields above stay as they
       // were so existing consumers are unaffected; this reports each loop
@@ -504,7 +544,7 @@ export function createApp(): express.Application {
       );
       const byNetwork = Object.fromEntries(perNetwork);
 
-      if (rpcSuccess && latestLedger !== null) {
+      if (rpcSuccess && latestLedger !== null && dependencies.railsUsable) {
         res.json({
           ok: true,
           status: "healthy",
@@ -519,8 +559,12 @@ export function createApp(): express.Application {
           lagLedgers: latestLedger - (lastIndexedLedger ?? latestLedger),
           ...stats,
           networks: byNetwork,
-        });
-      } else {
+          dependencies,
+    dependency_status_bound_ms: dependencyStatusBoundMs,
+    cache: cacheStatus(),
+  });
+} 
+else {
         res.setHeader("X-Data-Stale", "true");
         if (lastIndexedLedger !== null) {
           res.setHeader("X-As-Of-Ledger", String(lastIndexedLedger));
@@ -533,13 +577,16 @@ export function createApp(): express.Application {
           as_of_ledger: lastIndexedLedger ?? undefined,
           lastIndexedLedger,
           last_indexed_ledger: lastIndexedLedger,
-          latestLedger: null,
-          lagLedgers: null,
+          latestLedger: rpcSuccess ? latestLedger : null,
+          lagLedgers: rpcSuccess && latestLedger !== null ? latestLedger - (lastIndexedLedger ?? latestLedger) : null,
           ...stats,
           // Also reported when degraded — with two loops, "RPC is down" is
           // usually true of one chain only, and the top-level nulls above
           // cannot say which.
           networks: byNetwork,
+          dependencies,
+          dependency_status_bound_ms: dependencyStatusBoundMs,
+          cache: cacheStatus(),
         });
       }
     } catch (err) {
@@ -557,9 +604,10 @@ export function createApp(): express.Application {
    *   toLedger    — inclusive upper bound
    *   limit       — page size (max 200, default 50)
    *   offset      — pagination offset (default 0)
+   *   includeTotal— also return `total`, which costs a full COUNT (#206)
    *
    * Response:
-   *   { total, limit, offset, transfers: [...] }
+   *   { total?, hasMore, nextCursor, limit, offset, transfers: [...] }
    */
   app.get(
     "/transfers/incoming/:address",
@@ -698,9 +746,10 @@ export function createApp(): express.Application {
    *   toLedger    — inclusive upper bound
    *   limit       — page size (max 200, default 50)
    *   offset      — pagination offset (default 0)
+   *   includeTotal— also return `total`, which costs a full COUNT (#206)
    *
    * Response:
-   *   { total, limit, offset, transfers: [{ ...fields, direction }] }
+   *   { total?, hasMore, nextCursor, limit, offset, transfers: [{ ...fields, direction }] }
    */
   app.get(
     "/transfers/address/:address",
@@ -1005,9 +1054,10 @@ export function createApp(): express.Application {
    *   toLedger    — inclusive upper ledger bound
    *   limit       — page size (max 200, default 50)
    *   offset      — pagination offset (default 0)
+   *   includeTotal— also return `total`, which costs a full COUNT (#206)
    *
    * Response:
-   *   { total, limit, offset, transfers: [...] }
+   *   { total?, hasMore, nextCursor, limit, offset, transfers: [...] }
    */
   app.get(
     "/nfts/transfers",
@@ -1098,14 +1148,47 @@ export function createApp(): express.Application {
   );
 
   // ─── 404 handler ─────────────────────────────────────────────────────────
+  // `code` here too: an unmatched path under `/ngn` or `/offramp` is an error
+  // response on those surfaces, and a rail client must not meet a codeless
+  // body at the edge of the API.
   app.use((_req: Request, res: Response) => {
-    res.status(404).json({ error: "Not found" });
+    res.status(404).json({ error: "Not found", code: "not_found" });
   });
 
   // ─── Global error handler ────────────────────────────────────────────────
-  app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-    console.error("[api] Unhandled error:", err);
-    res.status(500).json({ error: err.message ?? "Internal server error" });
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    // A deliberately-thrown HttpError carries a message written for the caller,
+    // so it keeps its own status and text.
+    if (err instanceof HttpError) {
+      return res
+        .status(err.status)
+        .json({ error: err.message, code: err.status >= 500 ? "internal_error" : "invalid_request" });
+    }
+
+    // Anything else is unhandled, and its message is not ours to show. This
+    // handler used to answer `err.message` verbatim, which is how a Postgres
+    // connection string reached callers through a raw driver error. The caller
+    // gets a correlation id; the detail stays in the log.
+    // A body the parser could not read is the caller's mistake, not ours. Its
+    // error object carries the whole raw body, which can hold a national ID
+    // number or bank details, so only the failure type is logged.
+    const parseFailure = bodyParseFailure(err);
+    if (parseFailure) {
+      console.warn(`[api] Unreadable request body (${parseFailure.type})`);
+      return res
+        .status(parseFailure.status)
+        .json({ error: "The request body could not be read", code: "invalid_request" });
+    }
+
+    const correlationId = newCorrelationId();
+    // Never the raw error: libraries hang request data on their errors.
+    console.error(`[api] Unhandled error (${correlationId}):`, loggableError(err));
+
+    return res.status(500).json({
+      error: "Internal server error",
+      code: "internal_error",
+      correlationId,
+    });
   });
 
   return app;

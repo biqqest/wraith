@@ -14,10 +14,13 @@ import {
   getIndexerStats,
   resolveNftContractIds,
   resolveSacContractIds,
+  resolveWatchedContractIds,
   runningNetworks,
+  planNetworks,
   startAllIndexers,
   isIndexerRunning,
   getIndexerUnstartedReason,
+  stopIndexerLoops,
   _resetIndexerLoops,
 } from "../indexer";
 import { Asset, Networks } from "@stellar/stellar-sdk";
@@ -45,6 +48,16 @@ beforeEach(() => {
   _resetRpcClients();
   _resetIndexerLoops();
 });
+
+// The startAllIndexers case below launches a real background loop. Without
+// this it crash-restarts every 10s for the rest of the run — jest never exits
+// on its own, and the spam starves later suites into timeouts.
+afterAll(() => stopIndexerLoops());
+// A case that calls `startAllIndexers` starts a real loop, and the next
+// `beforeEach` is too late for the last case in the file: nothing runs after
+// it, so that loop would still be polling while Jest tears the environment
+// down.
+afterEach(() => _resetIndexerLoops());
 
 describe("enabledNetworks", () => {
   it("defaults to the single configured network, so existing deployments are unchanged", () => {
@@ -91,17 +104,33 @@ describe("per-network watch lists", () => {
     expect(DEFAULT_XLM_SAC_TESTNET).toBe(Asset.native().contractId(Networks.TESTNET));
   });
 
-  it("defaults each network to its own native XLM SAC", () => {
-    // The bug this prevents: reading STELLAR_NETWORK inside the resolver, so
-    // both loops watch the same chain's SAC and one indexes nothing.
+  it("defaults testnet to its native XLM SAC and mainnet to nothing", () => {
+    // Mainnet XLM is the busiest contract on the public network. On
+    // 2026-11-10 setting only an RPC URL turned this default into ~720,000
+    // events an hour, which held the one pooled database connection and took
+    // cash-out down. It is opt-in now.
     expect(resolveSacContractIds("testnet")).toEqual([DEFAULT_XLM_SAC_TESTNET]);
-    expect(resolveSacContractIds("mainnet")).toEqual([DEFAULT_XLM_SAC_MAINNET]);
+    expect(resolveSacContractIds("mainnet")).toEqual([]);
     expect(DEFAULT_XLM_SAC_TESTNET).not.toEqual(DEFAULT_XLM_SAC_MAINNET);
   });
 
-  it("keeps the process-wide default when no network is passed", () => {
+  it("never falls back to the other network's SAC", () => {
+    // The bug the per-network default prevents: reading STELLAR_NETWORK inside
+    // the resolver, so both loops watch the same chain's SAC.
     process.env.STELLAR_NETWORK = "mainnet";
-    expect(resolveSacContractIds()).toEqual([DEFAULT_XLM_SAC_MAINNET]);
+    expect(resolveSacContractIds("testnet")).toEqual([DEFAULT_XLM_SAC_TESTNET]);
+    expect(resolveSacContractIds()).toEqual([]);
+  });
+
+  it("still indexes mainnet XLM when it is named explicitly", () => {
+    process.env.SAC_CONTRACT_IDS_MAINNET = DEFAULT_XLM_SAC_MAINNET;
+    expect(resolveSacContractIds("mainnet")).toEqual([DEFAULT_XLM_SAC_MAINNET]);
+  });
+
+  it("watches only the named NFT contracts on mainnet, with no SAC added", () => {
+    process.env.NFT_CONTRACT_IDS_MAINNET = "CNAMES,CVEILIANS";
+    expect(resolveWatchedContractIds("mainnet")).toEqual(["CNAMES", "CVEILIANS"]);
+    expect(resolveWatchedContractIds("mainnet")).not.toContain(DEFAULT_XLM_SAC_MAINNET);
   });
 
   it("prefers the per-network env var over the shared one", () => {
@@ -221,19 +250,56 @@ describe("loop state isolation", () => {
   it("handles unconfigured RPC path gracefully and tracks unstarted status (#238)", () => {
     // testnet has public default; mainnet has no SOROBAN_RPC_URL_MAINNET
     const consoleError = jest.spyOn(console, "error").mockImplementation(() => {});
-    const consoleLog = jest.spyOn(console, "log").mockImplementation(() => {});
 
     try {
-      // Pass both networks where mainnet is missing its RPC endpoint
-      const runnable = startAllIndexers(["testnet", "mainnet"]);
+      // Pass both networks where mainnet is missing its RPC endpoint.
+      // `planNetworks`, not `startAllIndexers`: the case asks which loops the
+      // configuration yields, and calling the starter would leave a real
+      // testnet loop polling RPC long after this case has returned.
+      const runnable = planNetworks(["testnet", "mainnet"]);
 
-      expect(runnable).toContain("testnet");
-      expect(runnable).not.toContain("mainnet");
-      expect(isIndexerRunning("mainnet")).toBe(false);
+      expect(runnable).toEqual(["testnet"]);
       expect(getIndexerUnstartedReason("mainnet")).toMatch(/SOROBAN_RPC_URL_MAINNET is required/);
     } finally {
       consoleError.mockRestore();
-      consoleLog.mockRestore();
+    }
+  });
+
+  it("does not start a network that has an RPC but nothing to watch", () => {
+    // An empty watch list is not "watch nothing": fetchEvents drops the
+    // contract filter when handed none, so it would pull every contract event
+    // on mainnet. Skipped with a reason, never thrown.
+    process.env.SOROBAN_RPC_URL_MAINNET = "https://mainnet.example.invalid";
+    const consoleError = jest.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      expect(planNetworks(["testnet", "mainnet"])).toEqual(["testnet"]);
+      expect(getIndexerUnstartedReason("mainnet")).toMatch(/no contracts to watch on mainnet/);
+      expect(getIndexerUnstartedReason("mainnet")).toMatch(/NFT_CONTRACT_IDS_MAINNET/);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("starts mainnet once it has an RPC and a named contract", () => {
+    process.env.SOROBAN_RPC_URL_MAINNET = "https://mainnet.example.invalid";
+    process.env.NFT_CONTRACT_IDS_MAINNET = "CNAMES";
+
+    expect(planNetworks(["testnet", "mainnet"])).toEqual(["testnet", "mainnet"]);
+  });
+
+  it("starts nothing and throws nothing when no network is configured (#238)", () => {
+    // The original failure: one missing endpoint killed the process during
+    // main(), taking the API down with it.
+    const consoleError = jest.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      expect(() => startAllIndexers(["mainnet"])).not.toThrow();
+      expect(startAllIndexers(["mainnet"])).toEqual([]);
+      expect(isIndexerRunning("mainnet")).toBe(false);
+      expect(runningNetworks()).toEqual([]);
+    } finally {
+      consoleError.mockRestore();
     }
   });
 });

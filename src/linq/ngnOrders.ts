@@ -30,6 +30,9 @@
  */
 
 import { prisma } from "../db";
+import { recordOrderTerminal, terminalStatusOf } from "../metrics";
+import { isFailureStatus, recordMoneyFailure } from "./moneyFailures";
+import { crossCheckAmountNgn, NGN_SCALE_FACTOR, resolveEventNetwork } from "./webhook";
 
 export type NgnOrderKind = "onramp" | "bill";
 
@@ -58,8 +61,13 @@ export interface RecordNgnOrderParams {
  * user needs. Failing their request because our bookkeeping failed would turn a
  * placed order into an error message, and they would reasonably place it again.
  *
- * Idempotent on `(network, orderId)`, so a retried delivery or a double-submit
- * updates the row rather than creating a second one.
+ * Idempotent on `(network, orderId)`: recording the same order again updates
+ * its row rather than creating a second one.
+ *
+ * That is idempotency of the *record*, not of the order. A client that submits
+ * the same onramp or bill twice gets two orders from Linq, with two ids, and
+ * so two rows — correctly, because there are two orders. See
+ * docs/idempotency.md.
  */
 export async function recordNgnOrder(params: RecordNgnOrderParams): Promise<void> {
   const {
@@ -118,6 +126,8 @@ export async function findNgnOrder(
   orderId: string,
 ): Promise<{
   orderId: string;
+  customerRef: string;
+  walletAddress: string;
   status: string;
   kind: string;
   coin: string;
@@ -140,6 +150,8 @@ export async function findNgnOrder(
 
   return {
     orderId: row.orderId,
+    customerRef: row.customerRef,
+    walletAddress: row.walletAddress,
     status: row.status,
     kind: row.kind,
     coin: row.coin,
@@ -158,31 +170,93 @@ export async function findNgnOrder(
 /**
  * Apply a webhook event to an order we placed.
  *
- * Returns false when the order is not ours, so the caller can say so rather
- * than silently succeeding. Nothing here creates a row: an event for an order
- * we never placed is not ours to act on.
+ * Looked up by the compound `(network, orderId)` key. An explicit event
+ * `network` wins; without one the deployment's configured network is used.
+ * Returns false when the network is invalid or the order is not ours, so the
+ * caller can say so rather than silently succeeding. Nothing here creates a
+ * row: an event for an order we never placed is not ours to act on.
  */
 export async function reconcileNgnOrder(event: {
   orderId: string;
+  network?: string;
   status?: string;
   event: string;
   amountStableCoin?: number;
   amountNGN?: number;
   txHash?: string;
 }): Promise<boolean> {
-  const existing = await prisma.ngnOrder.findFirst({ where: { orderId: event.orderId } });
+  const network = resolveEventNetwork(event);
+  if (!network) return false;
+
+  const existing = await prisma.ngnOrder.findUnique({
+    where: { network_orderId: { network, orderId: event.orderId } },
+  });
   if (!existing) return false;
 
+  const status = event.status ?? event.event;
+  const wasTerminal = terminalStatusOf(existing.status);
+  const isTerminal = terminalStatusOf(status);
+
+  // Cross-check the provider's naira figure against the one we created the
+  // order with. This is the only place both numbers exist: the router has the
+  // webhook but not the row, so its band check cannot see a scale error at all
+  // — a 100x drift on a 1,000 naira order lands at 100,000, comfortably inside
+  // the plausible band.
+  //
+  // `amountNGN` is a String column, so it has to be widened before comparison;
+  // handing the raw field over would make the check report "non-numeric" on
+  // every webhook rather than on a real disagreement.
+  //
+  // A disagreement is logged but still persisted, because `settledNGN` records
+  // what the provider says happened and that can legitimately differ from the
+  // quote — an onramp depositor can transfer a little under or over. The one
+  // exception is the exact 100x factor from the 2026-10-14 incident, which no
+  // depositor produces by hand: that figure is refused rather than written,
+  // leaving the quoted amount in place instead of a corrupt settled one.
+  let persistSettledNgn = event.amountNGN != null;
+  if (event.amountNGN != null) {
+    const check = crossCheckAmountNgn(event.amountNGN, Number(existing.amountNGN));
+    if (!check.ok) {
+      console.error(
+        `[linq] amountNGN cross-check failed for order ${event.orderId}: ${check.reason}`,
+      );
+      if (check.factor === NGN_SCALE_FACTOR) persistSettledNgn = false;
+    }
+  }
+
   await prisma.ngnOrder.update({
-    where: { network_orderId: { network: existing.network, orderId: event.orderId } },
+    where: { network_orderId: { network, orderId: event.orderId } },
     data: {
-      status: event.status ?? event.event,
+      status,
       ...(event.amountStableCoin != null
         ? { settledStableCoin: String(event.amountStableCoin) }
         : {}),
-      ...(event.amountNGN != null ? { settledNGN: String(event.amountNGN) } : {}),
+      ...(persistSettledNgn ? { settledNGN: String(event.amountNGN) } : {}),
       ...(event.txHash ? { txHash: event.txHash } : {}),
     },
   });
+
+  // An order that ended failed after the user paid is a money-affecting
+  // failure and is written down as one. This is the case the table exists
+  // for: a biller refusing to vend is invisible to the chain, so without
+  // this record the only thing that ever learns about the failure is a
+  // client that happens to poll. A poll recording the same order hits the
+  // same (network, kind, orderId) row, so webhook plus poll is one incident.
+  if (isFailureStatus(status)) {
+    await recordMoneyFailure({
+      network: existing.network,
+      rail: existing.kind === "bill" ? "bill" : "onramp",
+      kind: "order_failed",
+      orderId: event.orderId,
+      providerCode: status,
+      message:
+        `${existing.kind === "bill" ? "Bill" : "Onramp"} order ended as "${status}" ` +
+        `— the order the user paid for did not complete.`,
+    });
+  }
+
+  if (isTerminal && !wasTerminal) {
+    recordOrderTerminal(existing.kind === "bill" ? "bills" : "onramp", status);
+  }
   return true;
 }

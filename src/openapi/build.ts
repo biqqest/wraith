@@ -1,9 +1,13 @@
 import { mkdirSync, writeFileSync } from "fs";
 import path from "path";
 import { OpenAPIRegistry, OpenApiGeneratorV3 } from "@asteasolutions/zod-to-openapi";
+import { getOhlcRefreshIntervalMs } from "../ohlcConfig";
 import {
   addressPathSchema,
   booleanOkResponseSchema,
+  candlesParamsSchema,
+  candlesQuerySchema,
+  candlesResponseSchema,
   errorResponseSchema,
   healthzResponseSchema,
   hostFnQuerySchema,
@@ -40,6 +44,8 @@ import {
   transferExportQuerySchema,
   binaryExportResponseSchema,
   linqWebhookAckResponseSchema,
+  offrampAvailabilityResponseSchema,
+  offrampRateQuerySchema,
   offrampRateResponseSchema,
   offrampVerifyBankBodySchema,
   offrampVerifiedBankSchema,
@@ -49,11 +55,23 @@ import {
   offrampOrderResponseSchema,
   offrampOrderParamsSchema,
   offrampOrderStatusResponseSchema,
-  offrampErrorResponseSchema,
+  railErrorResponseSchema,
   ngnCustomerStatusQuerySchema,
   ngnCustomerStatusResponseSchema,
+  ngnDataBundlesQuerySchema,
+  ngnDataBundlesResponseSchema,
+  feeReportQuerySchema,
+  feeReportResponseSchema,
   feesQuerySchema,
   feesResponseSchema,
+  opsFailuresQuerySchema,
+  opsFailuresResponseSchema,
+  discordErrorResponseSchema,
+  discordInteractionResponseSchema,
+  discordLinkCodeParamsSchema,
+  discordLinkCodeResponseSchema,
+  discordLinkRequestSchema,
+  discordLinkResponseSchema,
 } from "./schemas";
 
 const registry = new OpenAPIRegistry();
@@ -110,7 +128,31 @@ registry.registerPath({
       description: "OK",
       content: { "application/json": { schema: ngnCustomerStatusResponseSchema } },
     },
-    ...commonErrorResponses,
+    // Rail error shape (#287): every failure on /ngn carries `code`.
+    400: { description: "Bad Request (invalid_request / invalid_network / network_not_enabled / mainnet_only)", content: { "application/json": { schema: railErrorResponseSchema } } },
+    404: { description: "Not Found (code: not_found)", content: { "application/json": { schema: railErrorResponseSchema } } },
+    429: { description: "Rate limited (veil_rate_limited ours / rate_limited the provider's)", content: { "application/json": { schema: railErrorResponseSchema } } },
+    500: { description: "Internal Server Error (code: internal_error)", content: { "application/json": { schema: railErrorResponseSchema } } },
+    502: { description: "Provider error", content: { "application/json": { schema: railErrorResponseSchema } } },
+    503: { description: "Naira rails not configured on this deployment", content: { "application/json": { schema: railErrorResponseSchema } } },
+    504: { description: "Provider did not respond in time", content: { "application/json": { schema: railErrorResponseSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/ngn/bills/data-bundles",
+  summary: "Data bundle catalogue",
+  description:
+    "Read-only list of the data bundles a `data` bill can buy, optionally filtered by " +
+    "provider. Data is sold as catalogue items rather than arbitrary amounts, so the " +
+    "client picks one of these. Cached for five minutes.",
+  request: { query: ngnDataBundlesQuerySchema },
+  responses: {
+    200: {
+      description: "OK",
+      content: { "application/json": { schema: ngnDataBundlesResponseSchema } },
+    },
   },
 });
 
@@ -415,6 +457,38 @@ registry.registerPath({
   },
 });
 
+registry.registerPath({
+  method: "get",
+  path: "/ops/failures",
+  summary: "Recent money-affecting failures (operator view)",
+  description:
+    "Internal operator endpoint, not part of the public data API. Lists the durable " +
+    "records of money-affecting failures — a rejected payout, an order that ended " +
+    "failed after the user paid, a webhook reconciliation that gave up — so an " +
+    "operator can answer \"what broke today\" without a log search or database " +
+    "access. Ordinary validation errors are never recorded here. Requires " +
+    "`Authorization: Bearer <OPS_TOKEN>`; answers 503 when the deployment has no " +
+    "token configured, and 401 for a missing or wrong one. Rows name the rail, the " +
+    "order and what failed, and never carry a NIN.",
+  "x-internal": true,
+  request: { query: opsFailuresQuerySchema },
+  responses: {
+    200: {
+      description: "OK",
+      content: { "application/json": { schema: opsFailuresResponseSchema } },
+    },
+    401: {
+      description: "Missing or wrong operator token",
+      content: { "application/json": { schema: errorResponseSchema } },
+    },
+    503: {
+      description: "Ops endpoints are not configured on this deployment",
+      content: { "application/json": { schema: errorResponseSchema } },
+    },
+    ...commonErrorResponses,
+  },
+});
+
 const transferExportResponses = {
   200: {
     description: "File download of the full matching transfer set (no pagination).",
@@ -476,16 +550,38 @@ registry.registerPath({
 
 const internalErrorResponses = {
   ...commonErrorResponses,
-  502: { description: "Payout provider error", content: { "application/json": { schema: offrampErrorResponseSchema } } },
-  503: { description: "Offramp not configured on this deployment", content: { "application/json": { schema: offrampErrorResponseSchema } } },
+  429: { description: "Rate limited (this deployment's or the provider's — the `code` says which)", content: { "application/json": { schema: railErrorResponseSchema } } },
+  502: { description: "Payout provider error", content: { "application/json": { schema: railErrorResponseSchema } } },
+  503: { description: "Offramp not configured on this deployment", content: { "application/json": { schema: railErrorResponseSchema } } },
 };
 
 registry.registerPath({
   method: "get",
+  path: "/offramp/availability",
+  summary: "Is cash-out enabled on this deployment",
+  description:
+    internalDescription +
+    " Answers the availability question without pricing anything: it makes no provider call, so it costs none of the shared rate allowance.",
+  "x-internal": true,
+  responses: {
+    200: {
+      description: "OK",
+      content: { "application/json": { schema: offrampAvailabilityResponseSchema } },
+    },
+    ...commonErrorResponses,
+    // No 502: nothing here reaches the provider. 503 is the answer a client
+    // hides its cash-out CTA on, so it is the one that has to be documented.
+    503: { description: "Offramp not configured on this deployment", content: { "application/json": { schema: railErrorResponseSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/offramp/rate",
-  summary: "Indicative NGN/USDC rate",
+  summary: "Indicative naira-per-coin rate",
   description: internalDescription,
   "x-internal": true,
+  request: { query: offrampRateQuerySchema },
   responses: {
     200: { description: "OK", content: { "application/json": { schema: offrampRateResponseSchema } } },
     ...internalErrorResponses,
@@ -551,9 +647,114 @@ registry.registerPath({
   request: { params: offrampOrderParamsSchema },
   responses: {
     200: { description: "OK", content: { "application/json": { schema: offrampOrderStatusResponseSchema } } },
+    401: { description: "Order access token required (code: unauthorized)", content: { "application/json": { schema: railErrorResponseSchema } } },
     ...internalErrorResponses,
   },
 });
+
+registry.registerComponent("securitySchemes", "bearerAuth", { type: "http", scheme: "bearer" });
+
+registry.registerPath({
+  method: "get",
+  path: "/fees/report",
+  summary: "Platform fees charged, per UTC day and asset, with the policy behind them",
+  description:
+    "Internal endpoint. Not part of the public data API: an operator report over the fee " +
+    "ledger, behind the VEIL_FEE_REPORT_TOKEN bearer token. Nothing in it identifies a person.",
+  "x-internal": true,
+  security: [{ bearerAuth: [] }],
+  request: { query: feeReportQuerySchema },
+  responses: {
+    200: { description: "OK", content: { "application/json": { schema: feeReportResponseSchema } } },
+    400: { description: "Bad date range", content: { "application/json": { schema: errorResponseSchema } } },
+    401: { description: "Missing or wrong report token", content: { "application/json": { schema: errorResponseSchema } } },
+    500: { description: "The fee ledger could not be read", content: { "application/json": { schema: errorResponseSchema } } },
+    503: { description: "Fee reporting is not configured on this deployment", content: { "application/json": { schema: errorResponseSchema } } },
+  },
+});
+
+const discordDescription =
+  "Internal endpoint. Not part of the public data API: it belongs to the Veil Discord roles bot. " +
+  "Answers 503 unless the deployment has a Discord application configured. ";
+
+const discordError = (description: string) => ({
+  description,
+  content: { "application/json": { schema: discordErrorResponseSchema } },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/discord/interactions",
+  summary: "Discord interaction callback",
+  description:
+    discordDescription +
+    "Called by Discord when a member uses a command or presses a button. Every request is " +
+    "verified against the application's Ed25519 public key; anything else is answered 401.",
+  "x-internal": true,
+  responses: {
+    200: { description: "Interaction response", content: { "application/json": { schema: discordInteractionResponseSchema } } },
+    400: discordError("Unreadable interaction"),
+    401: discordError("Invalid request signature"),
+    503: discordError("Discord is not configured on this deployment"),
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/discord/link/{code}",
+  summary: "Which Discord member a link code belongs to",
+  description:
+    discordDescription +
+    "Lets the wallet show whose Discord account is about to be linked before the member " +
+    "approves. Returns no wallet address and cannot be used to look one up.",
+  "x-internal": true,
+  request: { params: discordLinkCodeParamsSchema },
+  responses: {
+    200: { description: "OK", content: { "application/json": { schema: discordLinkCodeResponseSchema } } },
+    410: discordError("The code is unknown, used, or has run out"),
+    503: discordError("Discord is not configured on this deployment"),
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/discord/link",
+  summary: "Prove a Veil wallet belongs to a Discord member",
+  description:
+    discordDescription +
+    "The wallet's passkey (and the spending account's key, when sent) sign a statement naming " +
+    "the code, the Discord member and the addresses. The passkey must be a signer the wallet " +
+    "contract lists and the contract must run Veil's wallet code. On success the member's " +
+    "roles are set. The response never contains an address.",
+  "x-internal": true,
+  request: {
+    body: { content: { "application/json": { schema: discordLinkRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Linked", content: { "application/json": { schema: discordLinkResponseSchema } } },
+    400: discordError("An address is missing or not valid"),
+    401: discordError("A signature did not check out, or the address is not a Veil wallet"),
+    409: discordError("The network has no record of the wallet (it may have been archived)"),
+    410: discordError("The code is unknown, used, or has run out"),
+    503: discordError("Discord is not configured, or the network could not be read"),
+  },
+});
+
+if (getOhlcRefreshIntervalMs() !== undefined) {
+  registry.registerPath({
+    method: "get",
+    path: "/candles/{bucket}/{contractId}",
+    summary: "OHLC candles for a token contract (single-network deployments only)",
+    request: {
+      params: candlesParamsSchema,
+      query: candlesQuerySchema,
+    },
+    responses: {
+      200: { description: "OK", content: { "application/json": { schema: candlesResponseSchema } } },
+      ...commonErrorResponses,
+    },
+  });
+}
 
 const generator = new OpenApiGeneratorV3(registry.definitions);
 const document = generator.generateDocument({

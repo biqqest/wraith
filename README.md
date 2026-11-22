@@ -106,11 +106,16 @@ PORT=3000
 docker compose up -d db
 ```
 
-### 4. Run database migrations
+### 4. Create the schema
 
 ```bash
-npx prisma migrate dev --name init
+npm run db:push
 ```
+
+This is the same guarded convergence the service runs on startup. The committed
+migrations under `prisma/migrations/` are a change history, not an init script,
+and are not applied by startup — see
+[docs/drift-recovery.md](docs/drift-recovery.md) for why, with the evidence.
 
 ### 5. Seed the database (optional)
 
@@ -422,6 +427,38 @@ body starts — so a client can tell a complete export from a partial one withou
 counting. Narrow with `address`, `contractId`, `fromLedger`/`toLedger` or
 `fromDate`/`toDate`, or raise `maxRows` up to 500 000.
 
+### CORS
+
+The read API answers every origin: `Access-Control-Allow-Origin: *`. That is
+deliberate — the data is public chain data, and a browser dashboard on any
+domain is the intended consumer. The same is true of GraphQL (read-only
+schema), the fee quote and the offramp quotes.
+
+The surfaces that are *not* public are restricted to the origins in
+`CORS_ALLOWED_ORIGINS` — a comma-separated list, matched exactly:
+
+| Surface | Routes |
+| ------- | ------ |
+| Offramp | `/offramp/orders*`, `/offramp/verify-bank`, `/offramp/trustline` |
+| Naira rails | `/ngn/*` |
+| Webhook subscriptions | `/webhooks` |
+| Metrics | `/metrics` |
+| Any other write | a route nobody has classified yet |
+
+A request from an origin that is not on that list is refused with `403` and
+the code `origin_not_allowed`, **before the route runs** — so a page on any
+site cannot create an offramp order. A request with **no `Origin` header** is
+always served: the mobile app, a server-to-server caller and `curl` all send
+none, and CORS has nothing to say about them.
+
+`POST /webhooks/linq` is the payout provider calling us. It is authenticated
+by an HMAC signature over the raw body, it gets no CORS headers at all, and it
+is never refused by the origin policy — a payment rail must not stop working
+because the list changed.
+
+`src/middleware/cors.ts` holds the whole table and the reasoning behind each
+row.
+
 ### Selecting a network
 
 Wraith stores testnet and mainnet rows in the same tables, discriminated by a
@@ -536,7 +573,8 @@ chain_tip_ledger{network="mainnet"} 5842150
 | `chain_tip_ledger` | gauge | `network` | Latest chain tip observed. Compared with `last_indexed_ledger`, it measures indexer lag. |
 | `db_query_duration_seconds` | histogram | `operation` | Duration of instrumented DB operations, failures included. |
 | `http_requests_total` | counter | `method`, `route`, `status` | HTTP requests served. `route` is the Express route *pattern*, never the raw URL, so addresses never become label values; an unmatched request reports `route="unknown"`. |
-| `http_request_duration_seconds` | histogram | `method`, `route` | HTTP latency, 5 ms to 10 s. No `status` label — the split is rarely worth the extra series. |
+| `http_request_duration_seconds` | histogram | `method`, `route` | HTTP latency, 5 ms to 40 s. No `status` label — the split is rarely worth the extra series. |
+| `provider_request_duration_seconds` | histogram | `provider`, `operation`, `outcome` | Time inside a payment-provider call (Linq), separately from the request. Same unit and buckets as the HTTP histogram: `http_request_duration_seconds - provider_request_duration_seconds` is wraith's own time. `operation` is a fixed list (`offramp_order`, `bill_pay`, …), never a URL. |
 
 Standard `process_*` and `nodejs_*` metrics are exported alongside these.
 
@@ -691,6 +729,34 @@ curl -OJ "http://localhost:3000/transfers.parquet?fromLedger=5840000&toLedger=58
 
 ***
 
+### `GET /candles/:bucket/:contractId`
+
+Returns OHLC candles from the existing `ohlc` aggregate tables. `bucket` is
+`1m`, `1h`, or `1d`; `contractId` is a 56-character Stellar contract address.
+Pagination uses `limit` (1–1000, default 100) and `offset` (non-negative, default 0).
+Refreshes are owned by the worker; there is no public refresh endpoint.
+
+The database must already contain working `ohlc.candles_*` tables and
+`ohlc.refresh_candles_*()` functions. They are not installed by Prisma's current
+startup path; the legacy `sql/001_ohlc_aggregates.sql` requires separate repair
+and deployment. These legacy aggregates do not separate networks, so they
+must not be used with a database containing transfers from multiple networks.
+
+The read route and scheduled refresh share one opt-in: set
+`OHLC_REFRESH_INTERVAL_MS=60000` to enable both after those database prerequisites
+are met. Unset, invalid, or `0` disables both; `SKIP_INDEXER=true` also disables
+both. They require exactly one enabled network matching `STELLAR_NETWORK`
+(default `testnet`); multi-network configurations leave the route unmounted.
+The worker stops scheduling on shutdown and skips ticks while an earlier
+refresh is still running.
+
+Run `npm run docs:openapi` with the same environment as the deployment. Without
+the opt-in, the generated specification omits the candles route. For an enabled
+single-network deployment, generate it with `OHLC_REFRESH_INTERVAL_MS=60000 npm
+run docs:openapi` (and the deployment's network settings).
+
+***
+
 ## Environment Variables
 
 | Variable                   | Default       | Description                                                                                   |
@@ -706,11 +772,13 @@ curl -OJ "http://localhost:3000/transfers.parquet?fromLedger=5840000&toLedger=58
 | `HORIZON_EVENTS_PATH`       | `/events`     | Horizon contract-events path used by the fallback source.                                      |
 | `START_LEDGER`             | *(tip)*       | Ledger to start indexing from. Leave blank to resume from DB state or start near the tip.     |
 | `POLL_INTERVAL_MS`         | `6000`        | Polling interval in ms (\~1 ledger ≈ 6 s)                                                     |
+| `OHLC_REFRESH_INTERVAL_MS` | disabled | Enables the candles read route and worker with a positive integer interval in ms (max 2147483647). Requires working single-network OHLC aggregates. Invalid, unset, `0`, or `SKIP_INDEXER=true` disables both. |
 | `CONTRACT_IDS`             | *(all)*       | Comma-separated token contract IDs to watch. Empty = watch all (very heavy on mainnet)        |
 | `EVENTS_BATCH_SIZE`        | `10000`       | Max events per RPC call (Stellar RPC hard-cap is 10 000)                                      |
 | `RETENTION_DAYS`           | `30`          | Delete transfers older than N days (keeps DB within free-tier limits)                         |
 | `NETWORKS`                 | *(`STELLAR_NETWORK`)* | Comma-separated networks to index in one process, e.g. `testnet,mainnet`. Also the set the API's `?network=` selector accepts. |
 | `PORT`                     | `3000`        | REST API port                                                                                 |
+| `CORS_ALLOWED_ORIGINS`    | *(empty)*     | Comma-separated origins allowed to call the restricted surfaces (offramp orders, naira rails, webhook subscriptions, `/metrics`, and any unclassified write). Empty = no browser origin may call them; requests with no `Origin` header are always served. See [CORS](#cors). |
 | `EXPORT_MAX_ROWS`          | `50000`       | Default row cap for `/transfers.csv` and `/transfers.parquet`. Clamped to 500 000; a caller may ask for less with `?maxRows=`. |
 
 ### RPC URL Resolution

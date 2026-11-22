@@ -57,6 +57,21 @@ export type BillCategory = "airtime" | "data" | "electricity" | "cabletv" | "bet
 /** The Stellar assets a bill can be funded with. */
 export type BillCoin = "xlm" | "usdc";
 
+export interface DataBundle { provider: string; code: string; label: string; megabytes: number; validityDays: number; amountNgn: number; }
+
+// Catalogue is intentionally read-only and provider-owned; no credentials or purchase is attempted.
+const DATA_BUNDLES: DataBundle[] = [
+  { provider: "MTN", code: "mtn-1gb-30d", label: "1 GB / 30 days", megabytes: 1024, validityDays: 30, amountNgn: 500 },
+  { provider: "AIRTEL", code: "airtel-1gb-30d", label: "1 GB / 30 days", megabytes: 1024, validityDays: 30, amountNgn: 500 },
+  { provider: "GLO", code: "glo-1gb-14d", label: "1 GB / 14 days", megabytes: 1024, validityDays: 14, amountNgn: 450 },
+];
+
+export function listDataBundles(provider?: string): DataBundle[] {
+  const normalized = provider?.trim().toUpperCase();
+  return DATA_BUNDLES.filter((bundle) => !normalized || bundle.provider === normalized).map((bundle) => ({ ...bundle }));
+}
+
+
 /**
  * Linq's coin selection for bills is a bare `xlm: true` at the top level, not
  * the `coin: { … }` object the onramp uses. Omitting the key means USDC.
@@ -101,11 +116,36 @@ export interface BillOrderResponse {
 }
 
 /**
+ * A provider 429 on order creation is retried this many times before it reaches
+ * the user.
+ *
+ * The offramp client already does this; bills never opted in. On 2026-11-11 a
+ * user paying for airtime with USDC was told "the payout service is busy, try
+ * again in a few seconds" by a 429 the provider answered in 140ms, with no
+ * Retry-After. Waiting those seconds is our job, not theirs: every Veil user
+ * shares one provider key, so one person can be refused for another's traffic.
+ *
+ * Only creation takes the retry. A 429 is taken to mean the request was refused
+ * before any work was done, so repeating it creates nothing twice. That is the
+ * conventional meaning rather than one Linq has stated, and it is the same
+ * belief the offramp's retry rests on. See docs/idempotency.md.
+ */
+const CREATE_RATE_LIMIT_RETRIES = 2;
+
+/**
  * Create a bill order and get back the address to pay.
  *
  * Nothing is vended until the deposit arrives — this call only reserves the
  * order and locks the rate. The user then sends `amountStableCoin` of `coin`
  * to the returned `wallet`, and Linq vends automatically on confirmation.
+ *
+ * **Not idempotent**, for the same reason as `createOnrampOrder`: no key is
+ * sent, but a 5xx or dropped connection is retried, so a lost answer becomes a
+ * second order. Nothing is vended without a deposit and the user is shown only
+ * the second `wallet`, so the orphan is never paid. See docs/idempotency.md.
+ *
+ * A 429 is waited out and retried, up to {@link CREATE_RATE_LIMIT_RETRIES}
+ * times and never past the deadline, before it is handed to the caller.
  */
 export async function payBill(params: PayBillParams): Promise<BillOrderResponse> {
   const {
@@ -141,6 +181,8 @@ export async function payBill(params: PayBillParams): Promise<BillOrderResponse>
       call<BillOrderResponse>("/b2b/bills/pay", {
         method: "POST",
         deadline,
+        operation: "bill_pay",
+        rateLimitRetries: CREATE_RATE_LIMIT_RETRIES,
         body: {
           customerRef,
           billCategory,
@@ -182,5 +224,6 @@ export interface BillStatus {
 export function getBillStatus(customerRef: string, orderId: string): Promise<BillStatus> {
   return call<BillStatus>("/b2b/bills/status", {
     query: { customerRef, orderId },
+    operation: "bill_status",
   });
 }
