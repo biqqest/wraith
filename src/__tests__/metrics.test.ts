@@ -7,6 +7,7 @@ import {
   observeDbQuery,
   recordRpcError,
   recordSkippedLedger,
+  recordChainTip,
   registry,
   _resetMetrics,
   httpRequestsTotal,
@@ -64,6 +65,7 @@ describe("Prometheus metrics (#39)", () => {
       expect(res.text).toContain("# TYPE ledgers_skipped_total counter");
       expect(res.text).toContain("# TYPE transfers_stored_total counter");
       expect(res.text).toContain("# TYPE rpc_errors_total counter");
+      expect(res.text).toContain("# TYPE chain_tip_ledger gauge");
       expect(res.text).toContain("# TYPE last_indexed_ledger gauge");
       expect(res.text).toContain("# TYPE db_query_duration_seconds histogram");
     });
@@ -73,7 +75,8 @@ describe("Prometheus metrics (#39)", () => {
       transfersStoredTotal.inc({ network: "testnet", type: "fungible" }, 5);
       transfersStoredTotal.inc({ network: "testnet", type: "nft" }, 2);
       lastIndexedLedger.set({ network: "testnet" }, 987_654);
-      recordRpcError("retry");
+      recordRpcError("testnet", "retry");
+      recordChainTip("testnet", 1050);
 
       const res = await request(app).get("/metrics");
 
@@ -81,7 +84,8 @@ describe("Prometheus metrics (#39)", () => {
       expect(res.text).toContain('transfers_stored_total{network="testnet",type="fungible"} 5');
       expect(res.text).toContain('transfers_stored_total{network="testnet",type="nft"} 2');
       expect(res.text).toContain('last_indexed_ledger{network="testnet"} 987654');
-      expect(res.text).toContain('rpc_errors_total{outcome="retry"} 1');
+      expect(res.text).toContain('rpc_errors_total{network="testnet",outcome="retry"} 1');
+      expect(res.text).toContain('chain_tip_ledger{network="testnet"} 1050');
     });
 
     it("does not depend on the database or RPC being up", async () => {
@@ -124,13 +128,13 @@ describe("Prometheus metrics (#39)", () => {
 
   describe("recordRpcError", () => {
     it("separates a retried attempt from an exhausted one", async () => {
-      recordRpcError("retry");
-      recordRpcError("retry");
-      recordRpcError("exhausted");
+      recordRpcError("testnet", "retry");
+      recordRpcError("testnet", "retry");
+      recordRpcError("mainnet", "exhausted");
 
       const res = await request(app).get("/metrics");
-      expect(res.text).toContain('rpc_errors_total{outcome="retry"} 2');
-      expect(res.text).toContain('rpc_errors_total{outcome="exhausted"} 1');
+      expect(res.text).toContain('rpc_errors_total{network="testnet",outcome="retry"} 2');
+      expect(res.text).toContain('rpc_errors_total{network="mainnet",outcome="exhausted"} 1');
     });
   });
 
